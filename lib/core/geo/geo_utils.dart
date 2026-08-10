@@ -8,7 +8,7 @@ import '../config/env.dart';
 const double kMapMinZoom = 13;
 
 /// 줌인 상한
-const double kMapMaxZoom = 19;
+const double kMapMaxZoom = 18;
 
 /// 지도·API 좌표 유효성 (finite + 범위). 실패 시 skip / 기본값.
 bool isValidLatLng(double? lat, double? lng) {
