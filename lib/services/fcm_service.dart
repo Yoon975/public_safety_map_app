@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' show DartPluginRegistrant;
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -17,12 +18,18 @@ const _fcmChannelName = '서버 알림';
 
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  // 백그라운드 isolate — local_notifications 동작에 플러그인 등록 필수
+  WidgetsFlutterBinding.ensureInitialized();
+  DartPluginRegistrant.ensureInitialized();
+
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   debugPrint('[FCM] bg data=${message.data}');
-  if (!ReportItem.isFcmReportPush(message.data) &&
-      ReportItem.fromFcmData(message.data) == null) {
-    return;
-  }
+
+  // TODO: 테스트 후 복구 — report 타입이 아니면 알림 생략
+  // if (!ReportItem.isFcmReportPush(message.data) &&
+  //     ReportItem.fromFcmData(message.data) == null) {
+  //   return;
+  // }
   if (!await NearbyReportAlert.isGlobalNotificationsEnabled()) return;
 
   final report = ReportItem.fromFcmData(message.data);
@@ -44,39 +51,73 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
       iOS: DarwinInitializationSettings(),
     ),
   );
+  await _ensureFcmAndroidChannel(plugin);
+  await _showReportNotification(plugin, message, report);
+}
+
+Future<void> _ensureFcmAndroidChannel(
+  FlutterLocalNotificationsPlugin plugin,
+) async {
   final androidImpl = plugin.resolvePlatformSpecificImplementation<
       AndroidFlutterLocalNotificationsPlugin>();
   await androidImpl?.createNotificationChannel(
     const AndroidNotificationChannel(
-      NearbyReportAlert.channelId,
-      NearbyReportAlert.channelName,
-      description: '내 위치 반경 400m 내 제보 알림',
+      _fcmChannelId,
+      _fcmChannelName,
+      description: '새로운 제보 등 서버 푸시',
       importance: Importance.high,
       playSound: true,
       enableVibration: true,
     ),
   );
-  await _showReportNotification(plugin, message, report);
 }
 
+/// GPS 거리 계산을 기다리지 않고 즉시 배너를 띄운다.
 Future<void> _showReportNotification(
   FlutterLocalNotificationsPlugin plugin,
   RemoteMessage message,
   ReportItem? report,
 ) async {
-  final double? distM = report == null
-      ? null
-      : await FcmReportProximity.distanceToReportMeters(report);
   final title = report != null
       ? NearbyReportAlert.formatReportAlertTitle(report)
-      : '제보';
+      : (message.notification?.title ??
+          message.data['title']?.toString() ??
+          '알림');
   final body = report != null
-      ? NearbyReportAlert.formatReportAlertBody(report, distanceM: distM)
-      : '주변에 새 제보가 있습니다';
+      ? NearbyReportAlert.formatReportAlertBody(report)
+      : (message.notification?.body ??
+          message.data['body']?.toString() ??
+          '새 알림이 있습니다');
   final notifId = report != null
       ? 10000 + (report.id.abs() % 1000000)
       : 80001;
+
   try {
+    final androidImpl = plugin.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
+    var enabled = await androidImpl?.areNotificationsEnabled();
+    debugPrint(
+      '[FCM] show start id=$notifId enabled=$enabled '
+      'title=$title androidImpl=${androidImpl != null}',
+    );
+
+    if (enabled == false) {
+      debugPrint(
+        '[FCM] 시스템 알림 권한 OFF — 배너가 표시되지 않습니다. '
+        '설정 → 앱 → 안전지도 → 알림 허용을 켜 주세요.',
+      );
+      final granted =
+          await androidImpl?.requestNotificationsPermission() ?? false;
+      enabled = await androidImpl?.areNotificationsEnabled();
+      debugPrint(
+        '[FCM] permission re-request granted=$granted enabled=$enabled',
+      );
+      if (enabled == false) {
+        debugPrint('[FCM] show aborted — notifications still disabled');
+        return;
+      }
+    }
+
     await plugin.show(
       id: notifId,
       title: title,
@@ -84,29 +125,28 @@ Future<void> _showReportNotification(
       payload: report != null ? NearbyReportAlert.reportPayload(report.id) : null,
       notificationDetails: NotificationDetails(
         android: AndroidNotificationDetails(
-          NearbyReportAlert.channelId,
-          NearbyReportAlert.channelName,
-          channelDescription: '내 위치 반경 400m 내 제보 알림',
+          _fcmChannelId,
+          _fcmChannelName,
+          channelDescription: '새로운 제보 등 서버 푸시',
           icon: 'ic_stat_report_warning',
           color: const Color(0xFFDC2626),
           importance: Importance.high,
           priority: Priority.high,
-          groupKey: NearbyReportAlert.groupKey,
-          onlyAlertOnce: true,
           playSound: true,
           enableVibration: true,
+          category: AndroidNotificationCategory.alarm,
           styleInformation: BigTextStyleInformation(body, contentTitle: title),
         ),
         iOS: DarwinNotificationDetails(
-          threadIdentifier: NearbyReportAlert.groupKey,
           presentAlert: true,
           presentSound: true,
           presentBadge: true,
         ),
       ),
     );
-  } catch (e) {
-    debugPrint('[FCM] local notification show failed: $e');
+    debugPrint('[FCM] show done id=$notifId');
+  } catch (e, st) {
+    debugPrint('[FCM] local notification show failed: $e\n$st');
   }
 }
 
@@ -128,19 +168,10 @@ class FcmService {
 
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
 
+    await _ensureFcmAndroidChannel(_plugin!);
     final androidImpl = _plugin!
         .resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>();
-    await androidImpl?.createNotificationChannel(
-      const AndroidNotificationChannel(
-        _fcmChannelId,
-        _fcmChannelName,
-        description: '새로운 제보 등 서버 푸시',
-        importance: Importance.high,
-        playSound: true,
-        enableVibration: true,
-      ),
-    );
     await androidImpl?.requestNotificationsPermission();
 
     await FirebaseMessaging.instance.requestPermission(
@@ -225,26 +256,35 @@ class FcmService {
   void _handleForeground(RemoteMessage message) async {
     debugPrint('[FCM] fg data=${message.data}');
     final plugin = _plugin;
-    if (plugin == null) return;
+    if (plugin == null) {
+      debugPrint('[FCM] fg skip — plugin null');
+      return;
+    }
 
-    if (!await NearbyReportAlert.isGlobalNotificationsEnabled()) return;
+    if (!await NearbyReportAlert.isGlobalNotificationsEnabled()) {
+      debugPrint('[FCM] fg skip — global notifications off');
+      return;
+    }
 
-    final isReport = ReportItem.isFcmReportPush(message.data) ||
-        ReportItem.fromFcmData(message.data) != null;
-    if (!isReport) return;
+    // TODO: 테스트 후 복구 — report 타입이 아니면 알림 생략
+    // final isReport = ReportItem.isFcmReportPush(message.data) ||
+    //     ReportItem.fromFcmData(message.data) != null;
+    // if (!isReport) return;
 
     final report = ReportItem.fromFcmData(message.data);
     debugPrint(
       '[FCM] parsed report id=${report?.id} lat=${report?.lat} lng=${report?.lng}',
     );
 
+    // 배너를 먼저 띄우고, 마커/목록은 이어서 처리
+    await _ensureFcmAndroidChannel(plugin);
+    await _showReportNotification(plugin, message, report);
+
     if (report != null) {
       await _onReportPush(message, report);
     } else {
       debugPrint('[FCM] report parse failed — marker skipped. data=${message.data}');
     }
-
-    await _showReportNotification(plugin, message, report);
   }
 
   void _handleTap(RemoteMessage message) async {

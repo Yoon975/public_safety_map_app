@@ -19,6 +19,7 @@ import '../../providers/fcm_inbox_store.dart';
 import '../../providers/map_provider.dart';
 import '../../services/nearby_monitor.dart';
 import '../../services/nearby_report_alert.dart';
+import '../../services/device_notification_permission.dart';
 import '../../widgets/media_image.dart';
 import '../../core/geo/geo_utils.dart';
 import '../report/create_report_page.dart';
@@ -871,14 +872,22 @@ class _SettingsCardState extends State<_SettingsCard> {
   }
 
   void _toggle(bool value) async {
-    setState(() => _enabled = value);
-    await NearbyReportAlert.setGlobalNotificationsEnabled(value);
-    if (!value && mounted) {
-      final monitor = context.read<NearbyMonitor>();
-      if (monitor.enabled) {
-        await monitor.stop();
+    if (value) {
+      final ok = await ensureDeviceNotificationPermission(context);
+      if (!mounted) return;
+      if (!ok) {
+        setState(() => _enabled = false);
+        return;
       }
+      setState(() => _enabled = true);
+      await NearbyReportAlert.setGlobalNotificationsEnabled(true);
+      return;
     }
+
+    setState(() => _enabled = false);
+    await NearbyReportAlert.setGlobalNotificationsEnabled(false);
+    if (!mounted) return;
+    await context.read<NearbyMonitor>().stop();
   }
 
   @override

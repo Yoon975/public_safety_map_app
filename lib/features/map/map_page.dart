@@ -25,6 +25,7 @@ import '../../providers/map_provider.dart';
 import '../../services/nearby_monitor.dart';
 import '../../services/nearby_report_alert.dart';
 import '../../services/guidance_notification.dart';
+import '../../services/device_notification_permission.dart';
 import '../../widgets/infra_cluster.dart';
 import '../../widgets/media_image.dart';
 import '../../widgets/report_markers.dart';
@@ -919,6 +920,11 @@ class _MapPageState extends State<MapPage>
   Future<void> _toggleNearbyMonitor() async {
     final monitor = context.read<NearbyMonitor>();
     final wasOn = monitor.enabled;
+    if (!wasOn) {
+      final ok = await ensureDeviceNotificationPermission(context);
+      if (!mounted) return;
+      if (!ok) return; // 시스템 알림 권한 없으면 ON 유지하지 않음
+    }
     final err = await monitor.toggle();
     if (!mounted) return;
     if (err != null) {
